@@ -5,13 +5,16 @@ import subprocess
 import logging
 import json
 import shutil
-from datetime import datetime
+import asyncio
+import signal
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
+import psutil
 
 # Load environment variables
 load_dotenv()
@@ -23,6 +26,18 @@ BASE_DIR = Path(__file__).parent
 SCRIPTS_DIR = BASE_DIR / "scripts"
 LOGS_DIR = BASE_DIR / "logs"
 PROCESSES_FILE = BASE_DIR / "processes.json"
+UPTIME_FILE = BASE_DIR / "uptime.txt"
+
+# Branding
+BOT_NAME = "AYAAN HOSTER"
+BOT_USERNAME = "@ayaanplugs"
+BRANDING = f"""
+╔══════════════════════════════════╗
+║   🌟 {BOT_NAME} 🌟        ║
+║   💫 Premium Bot Hosting        ║
+║   📱 {BOT_USERNAME}       ║
+╚══════════════════════════════════╝
+"""
 
 # Create necessary directories
 SCRIPTS_DIR.mkdir(exist_ok=True)
@@ -31,12 +46,17 @@ LOGS_DIR.mkdir(exist_ok=True)
 # Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler(BASE_DIR / 'bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Store running processes
 running_processes: Dict[int, subprocess.Popen] = {}
+start_time = datetime.now()
 
 class ScriptManager:
     """Manage Python scripts and their execution"""
@@ -45,7 +65,6 @@ class ScriptManager:
     def save_script(filename: str, content: str) -> bool:
         """Save a Python script to the scripts directory"""
         try:
-            # Security check: prevent directory traversal
             if ".." in filename or "/" in filename or "\\" in filename:
                 return False
             
@@ -104,7 +123,6 @@ class ScriptManager:
             if args:
                 cmd.extend(args)
             
-            # Create log file
             log_file = LOGS_DIR / f"{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
             
             with open(log_file, 'w') as f:
@@ -113,7 +131,8 @@ class ScriptManager:
                     stdout=f,
                     stderr=subprocess.STDOUT,
                     cwd=str(BASE_DIR),
-                    text=True
+                    text=True,
+                    preexec_fn=os.setsid if os.name != 'nt' else None
                 )
             
             return process
@@ -126,66 +145,180 @@ class ScriptManager:
         """Stop a running process"""
         try:
             if pid in running_processes:
-                running_processes[pid].terminate()
-                running_processes[pid].wait(timeout=5)
+                process = running_processes[pid]
+                if os.name != 'nt':
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                else:
+                    process.terminate()
+                process.wait(timeout=5)
                 del running_processes[pid]
                 return True
             return False
         except Exception as e:
             logger.error(f"Error stopping process: {e}")
             return False
+    
+    @staticmethod
+    def get_process_info(pid: int) -> Optional[Dict]:
+        """Get information about a running process"""
+        try:
+            process = psutil.Process(pid)
+            return {
+                'pid': pid,
+                'name': process.name(),
+                'cmdline': ' '.join(process.cmdline()),
+                'cpu_percent': process.cpu_percent(interval=0.1),
+                'memory_percent': process.memory_percent(),
+                'status': process.status(),
+                'create_time': datetime.fromtimestamp(process.create_time()).strftime('%Y-%m-%d %H:%M:%S')
+            }
+        except:
+            return None
 
+# Bot command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(
+            f"{BRANDING}\n\n❌ *Unauthorized Access!*\n\n"
+            f"Contact {BOT_USERNAME} for access.",
+            parse_mode='Markdown'
+        )
         return
     
-    welcome_text = (
-        "🤖 *Python Script Manager Bot*\n\n"
-        "I can help you manage and run Python scripts on Render.\n\n"
-        "*Available Commands:*\n"
-        "/start - Show this message\n"
-        "/upload - Upload a Python script\n"
-        "/list - List all scripts\n"
-        "/run - Run a script\n"
-        "/stop - Stop a running script\n"
-        "/delete - Delete a script\n"
-        "/view - View script content\n"
-        "/logs - View script logs\n"
-        "/help - Show detailed help\n"
-    )
+    uptime = datetime.now() - start_time
+    uptime_str = str(uptime).split('.')[0]
+    
+    welcome_text = f"""
+{BRANDING}
+
+🤖 *Welcome to {BOT_NAME}!*
+
+📊 *System Status:*
+┌───────────────────
+│ ⏱ Uptime: `{uptime_str}`
+│ 📁 Scripts: `{len(ScriptManager.list_scripts())}`
+│ 🔄 Running: `{len(running_processes)}`
+└───────────────────
+
+📚 *Available Commands:*
+/start - Show this message
+/upload - Upload Python script
+/list - List all scripts
+/run - Run a script
+/stop - Stop running script
+/delete - Delete a script
+/view - View script content
+/logs - View script logs
+/stats - Show system stats
+/restart - Restart bot
+/help - Detailed help
+
+💫 *Powered by {BOT_NAME}*
+📱 {BOT_USERNAME}
+"""
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
-    help_text = (
-        "*Detailed Commands:*\n\n"
-        "📤 */upload* - Upload a Python file\n"
-        "   Reply to this command with a .py file\n\n"
-        "📋 */list* - List all uploaded scripts\n\n"
-        "▶️ */run script_name [args]* - Run a script\n"
-        "   Example: /run my_script.py arg1 arg2\n\n"
-        "⏹ */stop pid* - Stop a running script\n"
-        "   Example: /stop 12345\n\n"
-        "🗑 */delete script_name* - Delete a script\n\n"
-        "👁 */view script_name* - View script content\n\n"
-        "📄 */logs script_name* - View recent logs\n\n"
-        "🔄 */restart* - Restart the bot\n"
-    )
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USERS:
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
+        return
+    
+    help_text = f"""
+{BRANDING}
+
+📖 *Detailed Command Guide:*
+
+📤 */upload* - Upload Python file
+   Reply with .py file
+
+📋 */list* - List all scripts
+
+▶️ */run script_name [args]* - Run script
+   Example: /run bot.py --debug
+
+⏹ */stop [pid]* - Stop running script
+   Example: /stop 12345
+
+🗑 */delete script_name* - Delete script
+
+👁 */view script_name* - View content
+
+📄 */logs script_name* - View logs
+
+📊 */stats* - System statistics
+
+🔄 */restart* - Restart bot
+
+💡 *Tips:*
+• Scripts run in background
+• Logs saved automatically
+• Use inline buttons for quick actions
+
+*Support:* {BOT_USERNAME}
+"""
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stats command"""
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USERS:
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
+        return
+    
+    uptime = datetime.now() - start_time
+    uptime_str = str(uptime).split('.')[0]
+    
+    # System stats
+    cpu_usage = psutil.cpu_percent(interval=0.5)
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    
+    stats_text = f"""
+{BRANDING}
+
+📊 *System Statistics:*
+
+⏱ *Uptime:* `{uptime_str}`
+📁 *Total Scripts:* `{len(ScriptManager.list_scripts())}`
+🔄 *Running Processes:* `{len(running_processes)}`
+
+💻 *Server Resources:*
+┌─────────────────────────────
+│ 💾 CPU: `{cpu_usage}%`
+│ 🧠 RAM: `{memory.percent}%` ({memory.used // (1024**3)}GB/{memory.total // (1024**3)}GB)
+│ 💿 Disk: `{disk.percent}%` ({disk.used // (1024**3)}GB/{disk.total // (1024**3)}GB)
+└─────────────────────────────
+
+🔴 *Running Processes:*
+"""
+    
+    if running_processes:
+        for pid, process in running_processes.items():
+            info = ScriptManager.get_process_info(pid)
+            if info:
+                stats_text += f"• PID `{pid}` - {info['name']} (CPU: {info['cpu_percent']}%)\n"
+    else:
+        stats_text += "• No running processes"
+    
+    stats_text += f"\n\n💫 *{BOT_NAME}* | {BOT_USERNAME}"
+    
+    await update.message.reply_text(stats_text, parse_mode='Markdown')
 
 async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /upload command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
     await update.message.reply_text(
-        "📤 Please upload a Python (.py) file.\n"
-        "Reply to this message with the file."
+        f"{BRANDING}\n\n📤 Please upload a Python (.py) file.\n"
+        f"Reply to this message with the file.\n\n"
+        f"💫 {BOT_NAME} | {BOT_USERNAME}"
     )
     context.user_data['awaiting_upload'] = True
 
@@ -193,18 +326,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle uploaded documents"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
-    # Check if user is in upload mode
     if not context.user_data.get('awaiting_upload', False):
         return
     
     document = update.message.document
     if not document or not document.file_name.endswith('.py'):
-        await update.message.reply_text("❌ Please upload a Python (.py) file!")
+        await update.message.reply_text(
+            f"❌ Please upload a Python (.py) file!\n\n"
+            f"💫 {BOT_NAME}"
+        )
         context.user_data['awaiting_upload'] = False
         return
+    
+    # Send typing action
+    await update.message.chat.send_action(action="typing")
     
     # Download the file
     file = await document.get_file()
@@ -213,9 +351,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Save the script
     if ScriptManager.save_script(document.file_name, content_str):
-        await update.message.reply_text(f"✅ Script '{document.file_name}' uploaded successfully!")
+        await update.message.reply_text(
+            f"✅ *Script '{document.file_name}' uploaded successfully!*\n\n"
+            f"📁 Scripts: `{len(ScriptManager.list_scripts())}`\n"
+            f"▶️ Run with: /run {document.file_name}\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
     else:
-        await update.message.reply_text(f"❌ Failed to upload script '{document.file_name}'")
+        await update.message.reply_text(
+            f"❌ Failed to upload script '{document.file_name}'\n\n"
+            f"💫 {BOT_NAME}"
+        )
     
     context.user_data['awaiting_upload'] = False
 
@@ -223,22 +370,33 @@ async def list_scripts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /list command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
     scripts = ScriptManager.list_scripts()
     if not scripts:
-        await update.message.reply_text("📂 No scripts found.")
+        await update.message.reply_text(
+            f"📂 *No scripts found.*\n\n"
+            f"Upload your first script with /upload\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
         return
     
     # Create keyboard with script names
     keyboard = []
-    for script in scripts:
-        keyboard.append([InlineKeyboardButton(script, callback_data=f"script_{script}")])
+    for i, script in enumerate(scripts):
+        if i < 20:  # Limit to 20 scripts to avoid huge keyboard
+            keyboard.append([InlineKeyboardButton(f"📄 {script}", callback_data=f"script_{script}")])
+    
+    if len(scripts) > 20:
+        keyboard.append([InlineKeyboardButton(f"➕ {len(scripts)-20} more scripts", callback_data="list_all")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"📋 *Available Scripts:* ({len(scripts)})\n\nClick a script to view options.",
+        f"📋 *Available Scripts:* ({len(scripts)})\n\n"
+        f"Click a script to view options.\n\n"
+        f"💫 {BOT_NAME} | {BOT_USERNAME}",
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
@@ -247,14 +405,17 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /run command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
     args = context.args
     if not args:
         await update.message.reply_text(
-            "⚠️ Please specify a script name.\n"
-            "Example: /run my_script.py"
+            f"⚠️ *Please specify a script name.*\n"
+            f"Example: /run my_script.py\n\n"
+            f"📋 Use /list to see available scripts\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
         )
         return
     
@@ -263,17 +424,28 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if script exists
     if filename not in ScriptManager.list_scripts():
-        await update.message.reply_text(f"❌ Script '{filename}' not found!")
+        await update.message.reply_text(
+            f"❌ *Script '{filename}' not found!*\n\n"
+            f"📋 Use /list to see available scripts\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
         return
+    
+    # Send typing action
+    await update.message.chat.send_action(action="typing")
     
     # Execute script
     process = ScriptManager.execute_script(filename, script_args)
     if process:
         running_processes[process.pid] = process
         await update.message.reply_text(
-            f"✅ Script '{filename}' started!\n"
-            f"PID: `{process.pid}`\n"
-            f"Logs: `/logs {filename}`",
+            f"✅ *Script '{filename}' started successfully!*\n\n"
+            f"🆔 PID: `{process.pid}`\n"
+            f"📊 Status: `Running`\n"
+            f"📄 Logs: /logs {filename}\n"
+            f"⏹ Stop: /stop {process.pid}\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
             parse_mode='Markdown'
         )
         
@@ -281,80 +453,115 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(1)
         if process.poll() is not None:
             await update.message.reply_text(
-                f"⚠️ Script '{filename}' finished quickly.\n"
-                f"Check logs: /logs {filename}"
+                f"⚠️ *Script '{filename}' finished quickly.*\n"
+                f"Check logs: /logs {filename}\n\n"
+                f"💫 {BOT_NAME}",
+                parse_mode='Markdown'
             )
             if process.pid in running_processes:
                 del running_processes[process.pid]
     else:
-        await update.message.reply_text(f"❌ Failed to run script '{filename}'")
+        await update.message.reply_text(
+            f"❌ *Failed to run script '{filename}'*\n\n"
+            f"Please check the script for errors.\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
     args = context.args
     if not args:
         # Show running processes
         if running_processes:
-            msg = "🔄 *Running Processes:*\n\n"
+            msg = f"🔄 *Running Processes:*\n\n"
             for pid, process in running_processes.items():
-                try:
-                    cmd = ' '.join(process.args)
-                    msg += f"PID: `{pid}` - {cmd}\n"
-                except:
-                    msg += f"PID: `{pid}`\n"
+                info = ScriptManager.get_process_info(pid)
+                if info:
+                    msg += f"• PID `{pid}` - {info['name']}\n"
+                    msg += f"  CPU: {info['cpu_percent']}% | RAM: {info['memory_percent']:.1f}%\n"
+            msg += f"\n💫 {BOT_NAME} | {BOT_USERNAME}"
             await update.message.reply_text(msg, parse_mode='Markdown')
         else:
-            await update.message.reply_text("ℹ️ No running processes.")
+            await update.message.reply_text(
+                f"ℹ️ *No running processes.*\n\n"
+                f"💫 {BOT_NAME} | {BOT_USERNAME}",
+                parse_mode='Markdown'
+            )
         return
     
     # Stop specific process
     try:
         pid = int(args[0])
         if ScriptManager.stop_process(pid):
-            await update.message.reply_text(f"✅ Process {pid} stopped successfully!")
+            await update.message.reply_text(
+                f"✅ *Process {pid} stopped successfully!*\n\n"
+                f"💫 {BOT_NAME} | {BOT_USERNAME}",
+                parse_mode='Markdown'
+            )
         else:
-            await update.message.reply_text(f"❌ Process {pid} not found or already stopped.")
+            await update.message.reply_text(
+                f"❌ *Process {pid} not found or already stopped.*\n\n"
+                f"💫 {BOT_NAME} | {BOT_USERNAME}",
+                parse_mode='Markdown'
+            )
     except ValueError:
-        await update.message.reply_text("❌ Invalid PID. Please provide a valid process ID.")
+        await update.message.reply_text(
+            f"❌ *Invalid PID.* Please provide a valid process ID.\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /delete command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
     args = context.args
     if not args:
         await update.message.reply_text(
-            "⚠️ Please specify a script name.\n"
-            "Example: /delete my_script.py"
+            f"⚠️ *Please specify a script name.*\n"
+            f"Example: /delete my_script.py\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
         )
         return
     
     filename = args[0]
     if ScriptManager.delete_script(filename):
-        await update.message.reply_text(f"✅ Script '{filename}' deleted successfully!")
+        await update.message.reply_text(
+            f"✅ *Script '{filename}' deleted successfully!*\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
     else:
-        await update.message.reply_text(f"❌ Failed to delete script '{filename}'")
+        await update.message.reply_text(
+            f"❌ *Failed to delete script '{filename}'*\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
 
 async def view_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /view command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
     args = context.args
     if not args:
         await update.message.reply_text(
-            "⚠️ Please specify a script name.\n"
-            "Example: /view my_script.py"
+            f"⚠️ *Please specify a script name.*\n"
+            f"Example: /view my_script.py\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
         )
         return
     
@@ -362,27 +569,34 @@ async def view_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = ScriptManager.get_script_content(filename)
     if content:
         # Truncate long content
-        if len(content) > 4000:
-            content = content[:4000] + "\n... (truncated)"
+        if len(content) > 3500:
+            content = content[:3500] + "\n... (truncated)"
         await update.message.reply_text(
-            f"📄 *{filename}*\n\n```python\n{content}\n```",
+            f"📄 *{filename}*\n\n```python\n{content}\n```\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
             parse_mode='Markdown'
         )
     else:
-        await update.message.reply_text(f"❌ Script '{filename}' not found!")
+        await update.message.reply_text(
+            f"❌ *Script '{filename}' not found!*\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
 
 async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /logs command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
     args = context.args
     if not args:
         await update.message.reply_text(
-            "⚠️ Please specify a script name.\n"
-            "Example: /logs my_script.py"
+            f"⚠️ *Please specify a script name.*\n"
+            f"Example: /logs my_script.py\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
         )
         return
     
@@ -391,7 +605,11 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_files = sorted(LOGS_DIR.glob(f"{filename}_*.log"), reverse=True)
     
     if not log_files:
-        await update.message.reply_text(f"ℹ️ No logs found for '{filename}'")
+        await update.message.reply_text(
+            f"ℹ️ *No logs found for '{filename}'*\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
         return
     
     # Read the most recent log
@@ -399,24 +617,34 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content = f.read()
     
     if content:
-        if len(content) > 4000:
-            content = content[-4000:] + "\n... (truncated)"
+        if len(content) > 3500:
+            content = content[-3500:] + "\n... (truncated)"
         await update.message.reply_text(
-            f"📄 *Logs for {filename}*\n\n```\n{content}\n```",
+            f"📄 *Logs for {filename}*\n\n```\n{content}\n```\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
             parse_mode='Markdown'
         )
     else:
-        await update.message.reply_text(f"ℹ️ Log file is empty for '{filename}'")
+        await update.message.reply_text(
+            f"ℹ️ *Log file is empty for '{filename}'*\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown'
+        )
 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /restart command"""
     user_id = update.effective_user.id
     if user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Unauthorized access!")
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
         return
     
-    await update.message.reply_text("🔄 Restarting bot...")
-    logger.info("Bot restart initiated by user")
+    await update.message.reply_text(
+        f"🔄 *Restarting {BOT_NAME}...*\n\n"
+        f"⏳ Please wait a moment.\n"
+        f"💫 {BOT_NAME} | {BOT_USERNAME}",
+        parse_mode='Markdown'
+    )
+    logger.info(f"Bot restart initiated by user {user_id}")
     
     # Exit with code 0 - Render will restart the process
     sys.exit(0)
@@ -433,19 +661,46 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if content:
             # Show script actions
             keyboard = [
-                [InlineKeyboardButton("▶️ Run", callback_data=f"run_{filename}")],
-                [InlineKeyboardButton("📄 View", callback_data=f"view_{filename}")],
-                [InlineKeyboardButton("🗑 Delete", callback_data=f"delete_{filename}")],
-                [InlineKeyboardButton("📋 Logs", callback_data=f"logs_{filename}")]
+                [InlineKeyboardButton("▶️ Run Script", callback_data=f"run_{filename}")],
+                [InlineKeyboardButton("📄 View Content", callback_data=f"view_{filename}")],
+                [InlineKeyboardButton("📋 View Logs", callback_data=f"logs_{filename}")],
+                [InlineKeyboardButton("🗑 Delete Script", callback_data=f"delete_{filename}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="back_to_list")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                f"📄 *{filename}*\n\nActions:",
+                f"📄 *{filename}*\n\n"
+                f"📊 Size: `{len(content)}` characters\n"
+                f"📅 Uploaded: `{datetime.fromtimestamp(Path(SCRIPTS_DIR/filename).stat().st_ctime).strftime('%Y-%m-%d %H:%M')}`\n\n"
+                f"*Actions:*\n\n"
+                f"💫 {BOT_NAME} | {BOT_USERNAME}",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
         else:
-            await query.edit_message_text(f"❌ Script '{filename}' not found!")
+            await query.edit_message_text(
+                f"❌ *Script '{filename}' not found!*\n\n"
+                f"💫 {BOT_NAME}",
+                parse_mode='Markdown'
+            )
+    
+    elif query.data == "back_to_list":
+        scripts = ScriptManager.list_scripts()
+        keyboard = []
+        for script in scripts[:20]:
+            keyboard.append([InlineKeyboardButton(f"📄 {script}", callback_data=f"script_{script}")])
+        
+        if len(scripts) > 20:
+            keyboard.append([InlineKeyboardButton(f"➕ {len(scripts)-20} more", callback_data="list_all")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"📋 *Available Scripts:* ({len(scripts)})\n\n"
+            f"Click a script to view options.\n\n"
+            f"💫 {BOT_NAME} | {BOT_USERNAME}",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
     
     elif query.data.startswith("run_"):
         filename = query.data.replace("run_", "")
@@ -453,31 +708,52 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if process:
             running_processes[process.pid] = process
             await query.edit_message_text(
-                f"✅ Script '{filename}' started!\nPID: `{process.pid}`",
+                f"✅ *Script '{filename}' started!*\n\n"
+                f"🆔 PID: `{process.pid}`\n"
+                f"📊 Status: `Running`\n"
+                f"📄 Logs: /logs {filename}\n\n"
+                f"💫 {BOT_NAME} | {BOT_USERNAME}",
                 parse_mode='Markdown'
             )
         else:
-            await query.edit_message_text(f"❌ Failed to run script '{filename}'")
+            await query.edit_message_text(
+                f"❌ *Failed to run script '{filename}'*\n\n"
+                f"💫 {BOT_NAME}",
+                parse_mode='Markdown'
+            )
     
     elif query.data.startswith("view_"):
         filename = query.data.replace("view_", "")
         content = ScriptManager.get_script_content(filename)
         if content:
-            if len(content) > 3500:
-                content = content[:3500] + "\n... (truncated)"
+            if len(content) > 3000:
+                content = content[:3000] + "\n... (truncated)"
             await query.edit_message_text(
-                f"📄 *{filename}*\n\n```python\n{content}\n```",
+                f"📄 *{filename}*\n\n```python\n{content}\n```\n\n"
+                f"💫 {BOT_NAME} | {BOT_USERNAME}",
                 parse_mode='Markdown'
             )
         else:
-            await query.edit_message_text(f"❌ Script '{filename}' not found!")
+            await query.edit_message_text(
+                f"❌ *Script '{filename}' not found!*\n\n"
+                f"💫 {BOT_NAME}",
+                parse_mode='Markdown'
+            )
     
     elif query.data.startswith("delete_"):
         filename = query.data.replace("delete_", "")
         if ScriptManager.delete_script(filename):
-            await query.edit_message_text(f"✅ Script '{filename}' deleted!")
+            await query.edit_message_text(
+                f"✅ *Script '{filename}' deleted!*\n\n"
+                f"💫 {BOT_NAME} | {BOT_USERNAME}",
+                parse_mode='Markdown'
+            )
         else:
-            await query.edit_message_text(f"❌ Failed to delete script '{filename}'")
+            await query.edit_message_text(
+                f"❌ *Failed to delete script '{filename}'*\n\n"
+                f"💫 {BOT_NAME}",
+                parse_mode='Markdown'
+            )
     
     elif query.data.startswith("logs_"):
         filename = query.data.replace("logs_", "")
@@ -487,24 +763,56 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(log_files[0], 'r') as f:
                 content = f.read()
             if content:
-                if len(content) > 3500:
-                    content = content[-3500:] + "\n... (truncated)"
+                if len(content) > 3000:
+                    content = content[-3000:] + "\n... (truncated)"
                 await query.edit_message_text(
-                    f"📄 *Logs for {filename}*\n\n```\n{content}\n```",
+                    f"📄 *Logs for {filename}*\n\n```\n{content}\n```\n\n"
+                    f"💫 {BOT_NAME} | {BOT_USERNAME}",
                     parse_mode='Markdown'
                 )
             else:
-                await query.edit_message_text(f"ℹ️ Log file is empty for '{filename}'")
+                await query.edit_message_text(
+                    f"ℹ️ *Log file is empty for '{filename}'*\n\n"
+                    f"💫 {BOT_NAME}",
+                    parse_mode='Markdown'
+                )
         else:
-            await query.edit_message_text(f"ℹ️ No logs found for '{filename}'")
+            await query.edit_message_text(
+                f"ℹ️ *No logs found for '{filename}'*\n\n"
+                f"💫 {BOT_NAME}",
+                parse_mode='Markdown'
+            )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.effective_message:
         await update.effective_message.reply_text(
-            "❌ An error occurred. Please try again later."
+            f"❌ *An error occurred.*\n\n"
+            f"Please try again later or contact {BOT_USERNAME}\n\n"
+            f"💫 {BOT_NAME}",
+            parse_mode='Markdown'
         )
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /ping command to check if bot is alive"""
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USERS:
+        await update.message.reply_text(f"❌ Unauthorized! Contact {BOT_USERNAME}")
+        return
+    
+    uptime = datetime.now() - start_time
+    uptime_str = str(uptime).split('.')[0]
+    
+    await update.message.reply_text(
+        f"🏓 *Pong!*\n\n"
+        f"🤖 Status: `🟢 Online`\n"
+        f"⏱ Uptime: `{uptime_str}`\n"
+        f"📁 Scripts: `{len(ScriptManager.list_scripts())}`\n"
+        f"🔄 Processes: `{len(running_processes)}`\n\n"
+        f"💫 {BOT_NAME} | {BOT_USERNAME}",
+        parse_mode='Markdown'
+    )
 
 def main():
     """Main function to run the bot"""
@@ -515,6 +823,11 @@ def main():
     if not ALLOWED_USERS:
         logger.error("ALLOWED_USER_IDS not set!")
         sys.exit(1)
+    
+    # Log startup
+    logger.info(f"🚀 {BOT_NAME} starting...")
+    logger.info(f"📱 {BOT_USERNAME}")
+    logger.info(f"👥 Allowed Users: {ALLOWED_USERS}")
     
     # Create application
     application = Application.builder().token(TOKEN).build()
@@ -529,7 +842,9 @@ def main():
     application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("view", view_command))
     application.add_handler(CommandHandler("logs", logs_command))
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("restart", restart_command))
+    application.add_handler(CommandHandler("ping", ping_command))
     
     # Add document handler for uploads
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
@@ -541,9 +856,8 @@ def main():
     application.add_error_handler(error_handler)
     
     # Start the bot
-    logger.info("Bot started!")
-    application.run_polling()
+    logger.info(f"✅ {BOT_NAME} is running!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    import asyncio
     main()
