@@ -51,9 +51,11 @@ active_users = set()
 admin_ids = {ADMIN_ID, OWNER_ID}
 banned_users = set()
 user_limits = {}
-bot_locked = False
 mandatory_channels = {}
 pending_zip_files = {}
+
+# Global variable - declared at module level
+bot_locked = False
 
 # --- Logging ---
 logging.basicConfig(
@@ -177,7 +179,6 @@ def kill_process_tree(process_info):
         process = process_info.get('process')
         if process and hasattr(process, 'pid'):
             try:
-                import psutil
                 parent = psutil.Process(process.pid)
                 children = parent.children(recursive=True)
                 for child in children:
@@ -612,7 +613,8 @@ def ping_command(message):
     start = time.time()
     msg = bot.reply_to(message, "🏓 Pong!")
     latency = round((time.time() - start) * 1000, 2)
-    bot.edit_message_text(f"🏓 Pong! Latency: {latency}ms", message.chat.id, msg.message_id)
+    bot.edit_message_text(f"🏓 Pong! Latency: {latency}ms\n💫 {BOT_NAME} | {YOUR_USERNAME}", 
+                         message.chat.id, msg.message_id)
 
 # --- Document Handler ---
 @bot.message_handler(content_types=['document'])
@@ -701,6 +703,9 @@ def process_zip(zip_path, user_id, user_folder, file_name, message):
 def handle_callbacks(call):
     user_id = call.from_user.id
     data = call.data
+    
+    # Use global bot_locked
+    global bot_locked
     
     if is_user_banned(user_id):
         bot.answer_callback_query(call.id, "❌ You are banned.", show_alert=True)
@@ -907,14 +912,12 @@ def handle_callbacks(call):
     
     elif data == 'lock_bot':
         if user_id in admin_ids:
-            global bot_locked
             bot_locked = True
             bot.answer_callback_query(call.id, "🔒 Bot locked.")
             send_welcome(call.message)
     
     elif data == 'unlock_bot':
         if user_id in admin_ids:
-            global bot_locked
             bot_locked = False
             bot.answer_callback_query(call.id, "🔓 Bot unlocked.")
             send_welcome(call.message)
