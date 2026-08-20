@@ -15,6 +15,7 @@ import threading
 import re
 import sys
 import atexit
+import requests
 
 # --- Configuration ---
 TOKEN = '8795008481:AAHVLyk6SKEShiuEi-tRB9zSjlorI47ifWQ'
@@ -23,6 +24,13 @@ ADMIN_ID = 8816494498
 YOUR_USERNAME = '@ayaanplugs'
 UPDATE_CHANNEL = '@ayaan_era'
 BOT_NAME = 'AYAAN HOSTER'
+
+# --- FORCE REMOVE WEBHOOK FIRST ---
+try:
+    response = requests.get(f'https://api.telegram.org/bot{TOKEN}/deleteWebhook')
+    print(f"Webhook deleted: {response.json()}")
+except:
+    print("Could not delete webhook")
 
 # Folder setup
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -53,8 +61,6 @@ banned_users = set()
 user_limits = {}
 mandatory_channels = {}
 pending_zip_files = {}
-
-# Global variable - declared at module level
 bot_locked = False
 
 # --- Logging ---
@@ -88,7 +94,6 @@ def init_db():
                   added_by INTEGER, added_date TEXT)''')
     c.execute('CREATE TABLE IF NOT EXISTS install_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, module_name TEXT, package_name TEXT, status TEXT, log TEXT, install_date TEXT)')
     
-    # Add owner and admin
     c.execute('INSERT OR IGNORE INTO admins (user_id, added_by, added_date) VALUES (?, ?, ?)',
               (OWNER_ID, OWNER_ID, datetime.now().isoformat()))
     if ADMIN_ID != OWNER_ID:
@@ -347,30 +352,6 @@ def create_admin_settings_menu():
     return markup
 
 # --- Script Running Functions ---
-def log_reader(process, chat_id, file_name):
-    try:
-        sent_msg = bot.send_message(chat_id, f"📜 *Live Logs:* `{file_name}`\n`Starting...`", parse_mode='Markdown')
-        full_log = ""
-        last_update = time.time()
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                full_log += line
-                if time.time() - last_update > 3.5:
-                    display = "\n".join(full_log.splitlines()[-12:])
-                    try:
-                        bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=sent_msg.message_id,
-                            text=f"📜 *Live Logs:* `{file_name}`\n```\n{display}\n```",
-                            parse_mode='Markdown'
-                        )
-                        last_update = time.time()
-                    except:
-                        pass
-        bot.send_message(chat_id, f"✅ `{file_name}` execution finished.")
-    except Exception as e:
-        print(f"Log Error: {e}")
-
 def run_script(script_path, script_owner_id, user_folder, file_name, message_obj, attempt=1):
     max_attempts = 2
     if attempt > max_attempts:
@@ -703,8 +684,6 @@ def process_zip(zip_path, user_id, user_folder, file_name, message):
 def handle_callbacks(call):
     user_id = call.from_user.id
     data = call.data
-    
-    # Use global bot_locked
     global bot_locked
     
     if is_user_banned(user_id):
@@ -1416,9 +1395,17 @@ if __name__ == '__main__':
     logger.info(f"🛡️ Admin: {ADMIN_ID}")
     logger.info(f"📱 {YOUR_USERNAME}")
     
+    # Remove webhook before starting
+    try:
+        bot.remove_webhook()
+        print("Webhook removed successfully")
+    except:
+        pass
+    
     while True:
         try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+            # Use non-threaded polling to avoid conflicts
+            bot.polling(non_stop=True, interval=0, timeout=60)
         except Exception as e:
             logger.error(f"Error: {e}")
             time.sleep(5)
